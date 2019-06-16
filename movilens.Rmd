@@ -1,0 +1,467 @@
+---
+title: "MovieLens Project"
+date: "June, 2019"
+output:
+  pdf_document:
+    number_sections: true
+---
+
+```{r setup, include=FALSE , echo=FALSE}
+knitr::opts_chunk$set(echo=FALSE, error=FALSE, warning=FALSE, message=FALSE)
+```
+
+
+#INTRODUCTION
+
+
+  A recommendation system studies the preferences of the users, offering suggestions on a certain content that they are interested in.
+
+  The preference systems analyze the historical data of the users (previous behavior, qualifications, places...). They can be of several types:
+     
+  - User-based systems: To predict whether the user would like a particular item, the recommendation system evaluates the opinion of other users with similar preferences.
+    
+  - Item-based sytems: In this case, to recommend a specific item to a user, the system will take into account the opinion of said user about other items that have been valued by the user and that are similar.
+    
+  - Hybrid recommendations systems.They are a combination of both user and item-based recomendation    
+      systems. 
+    
+  In the movilens project, our objetive is to predict the ratings of the movies in the validation set, training the algorithm with the edx set. The measure that we will use to evaluate the proximity of our predictions to their true values is RMSE. 
+    
+#DATA REVIEW
+
+```{r  message=FALSE, warning=FALSE}
+# Load data
+
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(Matrix)) install.packages("Matrix", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- read.table(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                      col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1)
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+##Dimensions
+
+```{r}
+
+dim(edx)
+
+```
+
+The data has 9000055 instances and 6 variables
+
+##Structure
+```{r}
+str(edx)
+
+```
+
+
+Almost all the features are integer or numeric. The exceptions are  genres and title, which are "character".
+
+##Genre distribution
+
+```{r}
+percentage <- prop.table(table(edx$genres)) * 100
+genre_freq<-(cbind(freq=table(edx$genres), percentage=percentage))
+head(genre_freq[order(genre_freq[,2],decreasing=TRUE),],10)
+
+rm(percentage,genere_freq)
+```
+
+If we study the category of genres as it is in the dataset, we could see that the percentage of ratings of each genre is quite small. Movies in the Drama category are the most rated, followed by Comedy.
+
+
+##Number of users and movies in the dataset
+
+```{r}
+  edx%>%summarize(num_users = n_distinct(userId),num_movies = n_distinct(movieId))
+
+```
+
+We have more users than movies. It seems right, because a user can rate several movies.
+
+#DATA CLEAN AND TRANSFORMATIONS
+
+```{r}
+
+sapply(edx,function(x)(sum(is.na(x))))
+
+
+```
+
+The data set is complete: there are not variables with NA values.
+
+
+As we have seen previously, the Timestamp feature is a number. We are going to transform it into Datetime, more suitable for our purposes.
+
+```{r}
+#Transformation of timestamp from integer to Datetime
+edx$timestamp<-as.POSIXct(edx$timestamp,origin = lubridate::origin)
+
+```
+
+
+#DATA VISUALIZATION
+
+
+```{r}
+#Evolution of number of ratings
+
+ttime<-edx%>%group_by(day=as.Date(timestamp))%>%summarise(n = n())
+ttime%>%ggplot(aes(x=day,y=n))+
+              geom_line( col="darkgreen",
+                 alpha = .6)+labs(x="Day",y="Number of ratings")+
+               ggtitle("Number of ratings per day")+
+               theme(plot.title = element_text(hjust = 0.5)) 
+ 
+rm(ttime) 
+
+```
+
+When studying the evolution of the data over time, what we could see is a big difference in the number of daily evaluations.
+We could ask themselves if the number of active users has change over time:
+
+```{r}
+
+#Evolution of number of active users
+
+ttime_user<-edx%>%mutate(year=year(timestamp))%>%select(userId,year)%>%unique()
+ttime_user2<-ttime_user%>%group_by(year)%>%summarise(n=n())
+
+ttime_user2%>%ggplot(aes(x=year,y=n))+
+              geom_line( col="darkgreen")+
+              scale_x_continuous(breaks = unique(ttime_user$year))+
+              labs(x="Year",y="Number of active users")+
+              ggtitle("Number of active users per year")+
+               theme(plot.title = element_text(hjust = 0.5)) 
+
+rm(ttime_user,ttime_user2)
+```
+
+The year with the most active users was 1996.  Then the number of active users suffered a big drop, until 1998, year in which the recovery began. Since then the number of users has been more stable, although having ups and downs.
+
+
+```{r}
+#Histogram rating per user
+
+edx%>%count(userId)%>%ggplot(aes(x=n))+
+              geom_histogram( binwidth = 0.1,
+                col="red",
+                 fill="green",
+                 alpha = .2)+scale_x_log10()+
+                ggtitle("Number of ratings per user")+
+               theme(plot.title = element_text(hjust = 0.5)) 
+
+
+```
+
+The number of ratings per user is quite heterogeneous. Some of the users are very active with a high number of ratings. 
+
+
+```{r}
+#Histogram of ratings per movie
+
+edx%>%count(movieId)%>%ggplot(aes(x=n))+
+              geom_histogram( binwidth = 0.15,
+                col="red",
+                 fill="green",
+                 alpha = .2)+scale_x_log10() +
+               ggtitle("Number of ratings per movie")+
+               theme(plot.title = element_text(hjust = 0.5)) 
+
+```
+
+Some movies have a lot of ratings (some of which almost 500), but the vast majority have few ratings. More than 10,000 films have less tha 50 ratings.
+
+```{r}
+
+#Histogram ratings
+
+edx%>%ggplot(aes(x=rating))+geom_histogram(center = 0.5,
+                  binwidth=0.5,                         
+                  col="red",
+                  fill="green",
+                  alpha = .2) +
+                  coord_flip()+
+                 labs(x="Stars", y="Number of ratings") +
+                  ggtitle("Number of ratings per star")+
+                  theme(plot.title = element_text(hjust = 0.5)) 
+
+
+```
+
+Regarding the ratings, users use to assign integer numbers. The most frequent puntuations are 4, 3 and 5 (in this orden). We can conclude that users tend to rate movies they like or they usually watch movies they like.
+
+```{r}
+#Boxplot ratings per gender(only genres with mora than 50000 ratings)
+edx %>% group_by(genres) %>%
+  mutate(n=n()) %>%
+  filter(n >= 50000) %>%ungroup() %>%
+  ggplot(aes(x=genres,y=rating, color=genres))+
+  geom_boxplot(outlier.colour="darkgreen", outlier.shape=1,
+                outlier.size=1)+
+  scale_fill_brewer(palette="Dark2")+
+  labs(x="Genres", y="Stars") +
+  ggtitle("Ratings per gender")+
+  theme(axis.text.x = element_text(angle = 55, hjust = 1),
+        plot.title = element_text(hjust = 0.5),legend.position="none")
+
+```
+
+
+We have only taken into account genres with more than 50000 ratings. The dispersion is accentuated, particularly in some genres. In most genders, the median is 3.5 or 4.
+
+
+```{r}
+
+#Evolution of ratings 
+
+  ttime_rating<-edx%>%select(timestamp,rating)%>% mutate(month = round_date(as_datetime(timestamp), unit = "month"))
+  
+  ttime_rating2<-ttime_rating%>%group_by(month)%>%summarise(media=mean(rating))
+
+  ttime_rating2%>%ggplot(aes(x=month,y=media))+
+              geom_line( col="darkgreen")+
+              labs(x="Month",y="Ratings")+
+              ggtitle("Average ratings per Month")+
+               theme(plot.title = element_text(hjust = 0.5)) 
+
+rm(ttime_rating,ttime_rating2)
+
+
+```
+
+
+Studying the changes in monthly average ratings over time, we can see that there is sligth evidence of a time effect. Excluding the first year, in which the use of the application was not very widespread, we see that the average of the ratings vary only between 3.3 and 3.7.
+
+
+
+
+#RESULTS
+
+```{r}
+
+## Split-out validation dataset
+
+set.seed(7)
+
+
+validationIndex <- createDataPartition(y = edx$rating, times = 1, p = 0.3, list = FALSE)
+
+testset1 <- edx[validationIndex,]
+
+trainset <- edx[-validationIndex,]
+
+testset <- testset1 %>% 
+  semi_join(trainset, by = "movieId") %>%
+  semi_join(trainset, by = "userId")
+
+rm(validationIndex)
+rm(testset1)
+```
+
+
+As we explained in the introduction, we could try three approaches: User-effect ,Item-effect and hybrid recommendation model:
+ 
+## Users-effect recommendation model
+
+ If we only take into account user effect, we have this kind of model:
+
+      Yu,i=mu+bu+eu,i  
+
+Where mu is the media of the ratings of all recomended movies, bu is the user effect for user u and eu,i is the error for user u and movie i.
+      
+```{r}
+##Users-effect recommendation model
+#training
+
+mu <- mean(trainset$rating) 
+user_avgs <- trainset %>% 
+  group_by(userId) %>% 
+  summarize(b_u = mean(rating - mu))
+
+#validation
+
+predicted_ratings <- mu + testset %>% 
+  left_join(user_avgs, by='userId') %>%
+  pull(b_u)
+
+model_user_RMSE <- RMSE(predicted_ratings, testset$rating)
+
+ 
+sprintf("User-effect model  RMSE: %f",model_user_RMSE)
+
+```
+
+## Item-effect recommendation model
+
+In this case, the model is: 
+    Yu,i=mu+bi+eu,i    
+    
+where mu is the media of the ratings of all recomended movies, bu is the user effect for user u and eu,i is the error for user u and movie i.
+
+```{r}
+## Item-effect recommendation model
+#training
+mu <- mean(trainset$rating) 
+movie_avgs <- trainset %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating - mu))
+
+#validation
+predicted_ratings <- mu + testset %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  pull(b_i)
+
+model_item_RMSE <- RMSE(predicted_ratings, testset$rating)
+
+ 
+sprintf("Item-effect model  RMSE: %f",model_item_RMSE)
+
+```
+In base of RMSE metric, this is a better model than the previous one. 
+
+## Hybrid-effect recommendation model
+
+In this case we are going to take into account bot user and movie effects. The model is:
+
+  Yu,i=mu+bi+bu+eu,i 
+  
+```{r}
+## Hybrid-effect recommendation model
+
+
+#validation
+
+predicted_ratings <- testset %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = mu +(b_i + b_u)) %>%
+  pull(pred)
+
+
+model_hybrid_RMSE <- RMSE(predicted_ratings, testset$rating)
+sprintf("Hybrid model RMSE: %f",model_hybrid_RMSE)
+
+```
+  
+The improvement in the RMSE metric is remarkable. Can we get a better result? 
+
+## Hybrid-effect recommendation model with regularization
+
+
+We can try to modify the model to avoid that those films with few ratings have as much influence on the result as those with many ratings. For this we will calculate the difference between the rating and the average, divided by the number of ratings and a parameter lambda. We will estimate this parameter using cross-valition.
+
+```{r}
+## Hybrid-effect recommendation model with regularization
+#Applying cross-validation to calculate the best lambda
+lambdas <- seq(0, 10, 0.25)
+
+rmses <- sapply(lambdas, function(l){
+  #training
+  mu <- mean(trainset$rating) 
+  
+  b_i <- trainset %>%  group_by(movieId) %>% summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  b_u <- trainset %>% left_join(b_i, by="movieId") %>% group_by(userId) %>%  summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+  
+  #validation
+  predicted_ratings <- testset %>% left_join(b_i, by = "movieId") %>%left_join(b_u, by = "userId")%>%mutate(pred = mu + b_i + b_u) %>%
+    pull(pred)
+  
+  return(RMSE(predicted_ratings, testset$rating))
+  
+})
+
+qplot(lambdas, rmses) 
+
+
+#The best lambda is:
+
+
+lambda <- lambdas[which.min(rmses)]
+sprintf("Lambda: %f",lambda)
+
+
+#The RMSE for the chosen lambda
+model_hybrid_recom_RMSE<-min(rmses)
+sprintf("Hybrid model with regularization RMSE: %f",model_hybrid_recom_RMSE)
+
+
+```
+
+  
+Comparing the four models, with which we obtain the best result is with the las one. Once the best model is chosen, we apply it to the validation data set:
+
+```{r}
+##  Appliying the model to de Validation dataset
+
+
+mu <- mean(edx$rating) 
+
+
+b_i <- edx %>%  group_by(movieId) %>% summarize(b_i = sum(rating - mu)/(n()+lambda))
+
+b_u <- edx %>% left_join(b_i, by="movieId") %>% group_by(userId) %>%  summarize(b_u = sum(rating - b_i - mu)/(n()+lambda))
+
+predicted_ratings <- validation %>% left_join(b_i, by = "movieId") %>%left_join(b_u, by = "userId") %>%mutate(pred = mu + b_i + b_u) %>% pull(pred)
+
+
+RMSE_validation<-RMSE(predicted_ratings, validation$rating)
+
+sprintf("RMSE_validation: %f", RMSE_validation)
+
+```
+
+#CONCLUSION
+
+
+  The previous analysis has been conditioned in a certain way by the size of the data set. In particular, I have not been able to perform dispersion analysis with the entire data set, and selecting subsets the results have been contradictory. In addition to the effects of user and item (movie, in this case), it seems that there may be slight effects due to gender and time. To simplify the calculation, in the model we will only take into account, in principle, user and item effects.
+  
+  Of the four tested models, with which better results are obtained (based on the values of RMSE) is a hybrid model, taking into account both the effects of the user and the movies, but after a process of regularization. with this model, the RMSE obtained applaying this model to the validation data set is:
+  
+
+    
+```{r}
+sprintf("RMSE: %f",RMSE_validation)
+```
+
+
+
+
+
+
